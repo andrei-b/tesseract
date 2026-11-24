@@ -20,6 +20,7 @@
 #include "boxread.h"
 #include "imagedata.h" // for ImageData
 #include "lstmrecognizer.h"
+#include "ocrrow.h"
 #include "pageres.h"
 #include "recodebeam.h"
 #include "tprintf.h"
@@ -224,6 +225,155 @@ ImageData *Tesseract::GetRectImage(const TBOX &box, const BLOCK &block, int padd
   return new ImageData(vertical_text, box_pix);
 }
 
+// Reread two distinct ink components on a common baseline. The synthetic
+// coordinates are private to this inference; original boxes are restored
+// before normal word alignment. The binary image is borrowed from textord.
+static Image ScaledGlyph(Image binary, const TBOX &box, int height) {
+  if (!TBOX(0, 0, pixGetWidth(binary), pixGetHeight(binary)).contains(box)) {
+    return nullptr;
+  }
+  Box *rect = boxCreate(box.left(), pixGetHeight(binary) - box.top(), box.width(), box.height());
+  Image glyph = pixClipRectangle(binary, rect, nullptr);
+  boxDestroy(&rect);
+  if (!glyph) {
+    return nullptr;
+  }
+  Image gray = pixConvertTo8(glyph, false);
+  glyph.destroy();
+  Image scaled = gray ? pixScaleToSize(gray, 0, height) : nullptr;
+  gray.destroy();
+  return scaled;
+}
+
+static Image BaselineAlignedPair(Image binary, const SubscriptPair &pair) {
+  constexpr int kBody = 40, kIndex = 34, kPad = 5, kGap = 2;
+  Image base = ScaledGlyph(binary, pair.base, kBody);
+  Image index = ScaledGlyph(binary, pair.index, kIndex);
+  Image canvas;
+  if (base && index) {
+    int next = kPad + pixGetWidth(base) + kGap;
+    canvas = pixCreate(next + pixGetWidth(index) + kPad, kBody + 2 * kPad, 8);
+    if (canvas) {
+      pixSetAll(canvas);
+      pixRasterop(canvas, kPad, kPad, pixGetWidth(base), kBody, PIX_SRC, base, 0, 0);
+      pixRasterop(canvas, next, kPad + kBody - kIndex, pixGetWidth(index), kIndex,
+                  PIX_SRC, index, 0, 0);
+    }
+  }
+  base.destroy();
+  index.destroy();
+  return canvas;
+}
+
+// A row that nearly failed layout can have a bad fitted baseline. Two
+// distinct decoder slots corroborated by the original ink need no reread.
+static void MarkAlignedPair(WERD_RES *word, const SubscriptPair &pair, const Dict *dict) {
+  WERD_CHOICE *choice = word->best_choice;
+  if (!choice || choice->length() < 2 || choice->length() > 4) {
+    return;
+  }
+  // In a word such as "By" the descender reaches below the baseline, but
+  // the top of the y is still near x-height. Require deeper placement before
+  // overriding a dictionary word (or when there is no language dictionary).
+  if (pair.base.top() - pair.index.top() < 0.55f * pair.base.height() &&
+      (!dict || dict->valid_word(*choice))) {
+    return;
+  }
+  const UNICHARSET &cs = *word->uch_set;
+  C_BLOB_IT it(word->word->cblob_list());
+  if (it.length() != choice->length()) {
+    return;
+  }
+  auto alnum = [&cs](UNICHAR_ID id) { return cs.get_isalpha(id) || cs.get_isdigit(id); };
+  TBOX prev = it.data()->bounding_box();
+  for (unsigned i = 1; i < choice->length(); ++i) {
+    it.forward();
+    TBOX current = it.data()->bounding_box();
+    auto base = choice->unichar_id(i - 1), index = choice->unichar_id(i);
+    if (cs.get_isalpha(base) && alnum(index) && (cs.get_isupper(base) || cs.get_isdigit(index)) &&
+        (i == 1 || !alnum(choice->unichar_id(i - 2))) &&
+        (i + 1 == choice->length() || !alnum(choice->unichar_id(i + 1))) &&
+        prev.left() <= pair.base.x_middle() && pair.base.x_middle() < prev.right() &&
+        current.left() <= pair.index.x_middle() && pair.index.x_middle() < current.right()) {
+      choice->SetBlobPosition(i, SP_SUBSCRIPT);
+      return;
+    }
+    prev = current;
+  }
+}
+
+// Retry only a disagreement in segmentation: two ink glyphs decoded as
+// one character, or as a base plus multiple punctuation fragments. A single
+// trailing comma already accounts for the second glyph and may be genuine.
+static void RecoverSubscriptWords(LSTMRecognizer *recognizer, Image binary, WERD *input,
+                                  int choice_mode, int iterations, PointerVector<WERD_RES> *words) {
+  std::vector<TBOX> boxes;
+  CollectScriptBlobs(input, &boxes);
+  const auto pairs = FindSubscriptPairs(std::move(boxes));
+  const UNICHARSET &charset = recognizer->GetUnicharset();
+  size_t w = 0;
+  int tries = 0;
+  for (const auto &pair : pairs) {
+    const TBOX &base = pair.base, &index = pair.index;
+    while (w < words->size() && (*words)[w]->word->bounding_box().right() <= base.x_middle()) {
+      ++w;
+    }
+    if (w == words->size()) {
+      break;
+    }
+    WERD_RES *old = (*words)[w];
+    MarkAlignedPair(old, pair, recognizer->GetDict());
+    int clearance = std::max(2, base.height() / 7);
+    if (tries >= 8 || base.right() > index.left() || pair.previous_right > base.left() - clearance ||
+        pair.next_left < index.right() + clearance) {
+      continue;
+    }
+    TBOX bounds = old->word->bounding_box();
+    if (bounds.left() > base.x_middle() || bounds.right() < index.x_middle() ||
+        bounds.left() < pair.previous_right || bounds.right() > pair.next_left) {
+      continue;
+    }
+    WERD_CHOICE *first = old->best_choice;
+    if (!first || (first->length() != 1 && first->length() != 3) ||
+        !charset.get_isalpha(first->unichar_id(0))) {
+      continue;
+    }
+    if (first->length() == 3 && (!charset.get_ispunctuation(first->unichar_id(1)) ||
+                                 !charset.get_ispunctuation(first->unichar_id(2)))) {
+      continue;
+    }
+
+    Image aligned = BaselineAlignedPair(binary, pair);
+    if (!aligned) {
+      continue;
+    }
+    ++tries;
+    TBOX synthetic(0, 0, pixGetWidth(aligned), pixGetHeight(aligned));
+    ImageData sample(false, aligned); // takes ownership
+    PointerVector<WERD_RES> retry;
+    recognizer->RecognizeLine(sample, 0, false, kWorstDictCertainty / kCertaintyScale,
+                              synthetic, &retry, choice_mode, iterations);
+    if (retry.size() != 1 || !retry[0]->best_choice) {
+      continue;
+    }
+    WERD_CHOICE *second = retry[0]->best_choice;
+    if (second->length() != 2 || second->unichar_id(0) != first->unichar_id(0) ||
+        (!charset.get_isalpha(second->unichar_id(1)) && !charset.get_isdigit(second->unichar_id(1))) ||
+        second->certainty(1) < -1.0f) {
+      continue;
+    }
+    second->SetBlobPosition(1, SP_SUBSCRIPT);
+    retry[0]->word->cblob_list()->clear();
+    C_BLOB_IT blobs(retry[0]->word->cblob_list());
+    blobs.add_after_then_move(C_BLOB::FakeBlob(base));
+    blobs.add_after_then_move(C_BLOB::FakeBlob(index));
+    retry[0]->word->set_blanks(old->word->space());
+    retry[0]->space_certainty = old->space_certainty;
+    std::swap((*words)[w], retry[0]);
+    ++w;
+  }
+}
+
 // Recognizes a word or group of words, converting to WERD_RES in *words.
 // Analogous to classify_word_pass1, but can handle a group of words as well.
 void Tesseract::LSTMRecognizeWord(const BLOCK &block, ROW *row, WERD_RES *word,
@@ -254,6 +404,11 @@ void Tesseract::LSTMRecognizeWord(const BLOCK &block, ROW *row, WERD_RES *word,
                                   kWorstDictCertainty / kCertaintyScale, word_box, words,
                                   lstm_choice_mode, lstm_choice_iterations);
   delete im_data;
+  if (RecoverSubscriptsEnabled() && !words->empty() && block.re_rotation().x() == 1.0f &&
+      block.classify_rotation().x() == 1.0f) {
+    RecoverSubscriptWords(lstm_recognizer_, pix_binary_, word->word, lstm_choice_mode,
+                          lstm_choice_iterations, words);
+  }
   SearchWords(words);
 }
 

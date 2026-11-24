@@ -403,7 +403,7 @@ void Textord::cleanup_nontext_block(BLOCK *block) {
  * Delete empty blocks, rows from the page.
  **********************************************************************/
 
-void Textord::cleanup_blocks(bool clean_noise, BLOCK_LIST *blocks) {
+void Textord::cleanup_blocks(bool clean_noise, BLOCK_LIST *blocks, bool recover_scripts) {
   BLOCK_IT block_it = blocks; // iterator
   ROW_IT row_it;              // row iterator
 
@@ -425,8 +425,10 @@ void Textord::cleanup_blocks(bool clean_noise, BLOCK_LIST *blocks) {
         ROW *row = row_it.data();
         ++num_rows_all;
         clean_small_noise_from_words(row);
-        if ((textord_noise_rejrows && !row->word_list()->empty() && clean_noise_from_row(row)) ||
-            row->word_list()->empty()) {
+        if (row->word_list()->empty() ||
+            (textord_noise_rejrows && clean_noise_from_row(row) &&
+             !(recover_scripts && block->re_rotation().x() == 1.0f &&
+               block->classify_rotation().x() == 1.0f && row->HasRepeatedSubscripts()))) {
           delete row_it.extract(); // lose empty row.
         } else {
           if (textord_noise_rejwords) {

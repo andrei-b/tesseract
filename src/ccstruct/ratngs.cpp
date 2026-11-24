@@ -23,8 +23,10 @@
 #include "ratngs.h"
 
 #include "blobs.h"
+#include "boxword.h"
 #include "matrix.h"
 #include "normalis.h" // kBlnBaselineOffset.
+#include "ocrrow.h"
 #include "unicharset.h"
 
 #include <algorithm>
@@ -586,6 +588,72 @@ void WERD_CHOICE::SetScriptPositions(bool small_caps, TWERD *word, int debug) {
       }
       chunk_index += state_.empty() ? 1 : state_[blob_index];
     }
+  }
+}
+
+// The LSTM decoder refines its symbol boxes in original image coordinates.
+// Compare the bottoms relative to the row spline so a sloped line is not
+// mistaken for a subscript. Limit inference to short alphanumeric runs.
+void WERD_CHOICE::MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row) {
+  if (boxes.length() != length() || row.x_height() <= 0) {
+    return;
+  }
+  auto alnum = [this](unsigned i) {
+    return unicharset_->get_isalpha(unichar_id(i)) || unicharset_->get_isdigit(unichar_id(i));
+  };
+  for (unsigned start = 0; start < length();) {
+    if (!alnum(start)) {
+      ++start;
+      continue;
+    }
+    unsigned end = start + 1;
+    while (end < length() && alnum(end)) {
+      ++end;
+    }
+    // English LSTM often reads a lowered digit after a capital as a comma.
+    // Admit a single terminal comma only if its ink has the size of a letter.
+    bool comma = end == start + 1 && end + 1 == length() &&
+                 unicharset_->get_isupper(unichar_id(start)) &&
+                 unichar_id(end) == unicharset_->unichar_to_id(",");
+    if (comma) {
+      ++end;
+    }
+    if (end - start == 2 || end - start == 3) {
+      const TBOX &base = boxes.BlobBox(start);
+      float height = base.height();
+      float base_depth = row.base_line(base.x_middle()) - base.bottom();
+      bool lowered = height >= 5;
+      for (unsigned i = start + 1; lowered && i < end; ++i) {
+        const TBOX &index = boxes.BlobBox(i);
+        const TBOX &previous = boxes.BlobBox(i - 1);
+        float depth = row.base_line(index.x_middle()) - index.bottom();
+        // The bottom of a descending base can lie below the row baseline.
+        float shift = depth - std::min(base_depth, height * 0.08f);
+        // A digit can be as tall as a lowercase base even at index size.
+        float max_height = unicharset_->get_isdigit(unichar_id(i)) ? 1.05f : 0.82f;
+        int gap = index.left() - previous.right();
+        if (!unicharset_->get_isalpha(unichar_id(start)) &&
+            !unicharset_->get_isdigit(unichar_id(i))) {
+          lowered = false;
+          break;
+        }
+        if (comma && (index.width() < 0.25f * height || index.height() < 0.45f * height)) {
+          lowered = false;
+          break;
+        }
+        lowered = BlobPosition(i) == SP_NORMAL && index.height() >= 0.32f * height &&
+                  index.height() <= max_height * height && index.x_middle() > previous.x_middle() &&
+                  gap >= -0.25f * height && gap <= 0.5f * height &&
+                  shift >= 0.16f * height && shift <= 0.75f * height &&
+                  depth >= -0.05f * height && base.top() - index.top() >= 0.15f * height;
+      }
+      if (lowered) {
+        for (unsigned i = start + 1; i < end; ++i) {
+          script_pos_[i] = SP_SUBSCRIPT;
+        }
+      }
+    }
+    start = end;
   }
 }
 

@@ -24,7 +24,73 @@
 #include "blobbox.h"
 #include "ocrrow.h"
 
+#include <algorithm>
+#include <limits>
+
 namespace tesseract {
+
+void CollectScriptBlobs(WERD *word, std::vector<TBOX> *boxes) {
+  for (auto *list : {word->cblob_list(), word->rej_cblob_list()}) {
+    C_BLOB_IT it(list);
+    for (it.mark_cycle_pt(); !it.cycled_list(); it.forward()) {
+      const TBOX box = it.data()->bounding_box();
+      if (box.width() >= 2 && box.height() >= 2) {
+        boxes->push_back(box);
+      }
+    }
+  }
+}
+
+std::vector<SubscriptPair> FindSubscriptPairs(std::vector<TBOX> boxes) {
+  std::sort(boxes.begin(), boxes.end(), [](const TBOX &a, const TBOX &b) {
+    return a.left() < b.left() || (a.left() == b.left() && a.height() > b.height());
+  });
+  // Join vertically separated pieces in the same columns, such as the dot of j.
+  std::vector<TBOX> glyphs;
+  for (const auto &box : boxes) {
+    if (!glyphs.empty() && box.left() < glyphs.back().right() &&
+        !box.y_overlap(glyphs.back()) &&
+        std::min(box.height(), glyphs.back().height()) * 3 <=
+            std::max(box.height(), glyphs.back().height())) {
+      glyphs.back() += box;
+    } else {
+      glyphs.push_back(box);
+    }
+  }
+  std::vector<SubscriptPair> pairs;
+  for (size_t i = 1; i < glyphs.size(); ++i) {
+    const TBOX &base = glyphs[i - 1], &index = glyphs[i];
+    float h = base.height();
+    int gap = index.left() - base.right();
+    int drop = base.bottom() - index.bottom();
+    if (h >= 9 && base.width() >= 0.22f * h && base.width() <= 1.6f * h &&
+        index.width() >= 0.19f * h && index.width() <= 0.96f * h &&
+        index.height() >= 0.37f * h && index.height() <= 0.95f * h &&
+        gap >= -0.22f * h && gap <= 0.5f * h &&
+        drop >= 0.10f * h && drop <= 0.68f * h && base.top() - index.top() >= 0.30f * h) {
+      pairs.push_back({base, index, i > 1 ? glyphs[i - 2].right() : std::numeric_limits<int>::min(),
+                       i + 1 < glyphs.size() ? glyphs[i + 1].left() : std::numeric_limits<int>::max()});
+    }
+  }
+  return pairs;
+}
+
+bool ROW::HasRepeatedSubscripts() {
+  std::vector<TBOX> boxes;
+  WERD_IT it(word_list());
+  for (it.mark_cycle_pt(); !it.cycled_list(); it.forward()) {
+    CollectScriptBlobs(it.data(), &boxes);
+  }
+  auto pairs = FindSubscriptPairs(std::move(boxes));
+  for (size_t i = 1; i < pairs.size(); ++i) {
+    const TBOX &a = pairs[i - 1].base, &b = pairs[i].base;
+    if (b.left() > pairs[i - 1].index.right() && b.height() >= 0.7f * a.height() &&
+        b.height() <= 1.4f * a.height() && std::abs(b.bottom() - a.bottom()) <= 0.35f * a.height()) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**********************************************************************
  * ROW::ROW

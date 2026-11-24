@@ -39,7 +39,9 @@
 
 namespace tesseract {
 
+class BoxWord;
 class MATRIX;
+class ROW;
 struct TBLOB;
 struct TWERD;
 
@@ -313,6 +315,10 @@ public:
   inline unsigned state(unsigned index) const {
     return state_[index];
   }
+  void SetBlobPosition(unsigned index, ScriptPos pos) {
+    ASSERT_HOST(index < length_);
+    script_pos_[index] = pos;
+  }
   ScriptPos BlobPosition(unsigned index) const {
     if (index >= length_) {
       return SP_NORMAL;
@@ -553,6 +559,7 @@ public:
   void SetScriptPositions(bool small_caps, TWERD *word, int debug = 0);
   // Sets all the script_pos_ positions to the given position.
   void SetAllScriptPositions(ScriptPos position);
+  void MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row);
 
   static ScriptPos ScriptPositionOf(bool print_debug, const UNICHARSET &unicharset,
                                     const TBOX &blob_box, UNICHAR_ID unichar_id);

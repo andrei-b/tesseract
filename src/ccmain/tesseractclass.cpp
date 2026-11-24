@@ -426,6 +426,12 @@ Tesseract::Tesseract()
                   this->params())
     , STRING_MEMBER(page_separator, "\f", "Page separator (default is form feed control character)",
                     this->params())
+    , BOOL_MEMBER(lstm_recover_subscripts, false,
+                  "Recover lowered glyphs from ink components in horizontal LSTM text",
+                  this->params())
+    , BOOL_MEMBER(lstm_detect_subscripts, false,
+                  "Mark lowered indices in horizontal LSTM text using the symbol iterator",
+                  this->params())
     , INT_MEMBER(lstm_choice_mode, 0,
                  "Allows to include alternative symbols choices in the hOCR output. "
                  "Valid input values are 0, 1 and 2. 0 is the default value. "

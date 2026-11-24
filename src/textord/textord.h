@@ -90,7 +90,7 @@ public:
   void TextordPage(PageSegMode pageseg_mode, const FCOORD &reskew, int width, int height,
                    Image binary_pix, Image thresholds_pix, Image grey_pix, bool use_box_bottoms,
                    BLOBNBOX_LIST *diacritic_blobs, BLOCK_LIST *blocks, TO_BLOCK_LIST *to_blocks,
-                   float *gradient);
+                   float *gradient, bool recover_scripts);
 
   // If we were supposed to return only a single textline, and there is more
   // than one, clean up and leave only the best.
@@ -203,7 +203,7 @@ private:
   // Must have at least one WERD.
   // WERDs contain a fake blob.
   void cleanup_nontext_block(BLOCK *block);
-  void cleanup_blocks(bool clean_noise, BLOCK_LIST *blocks);
+  void cleanup_blocks(bool clean_noise, BLOCK_LIST *blocks, bool recover_scripts);
   bool clean_noise_from_row(ROW *row);
   void clean_noise_from_words(ROW *row);
   // Remove outlines that are a tiny fraction in either width or height

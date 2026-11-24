@@ -461,6 +461,13 @@ bool Tesseract::recog_all_words(PAGE_RES *page_res, ETEXT_DESC *monitor,
     if (word->best_choice == nullptr || word->best_choice->empty() ||
         (word->best_choice->IsAllSpaces() && (pb == nullptr || pb->IsText()))) {
       page_res_it.DeleteCurrentWord();
+    } else if (lstm_detect_subscripts && tessedit_ocr_engine_mode == OEM_LSTM_ONLY &&
+               !right_to_left() && word->box_word != nullptr) {
+      const BLOCK *block = page_res_it.block()->block;
+      if (block != nullptr && block->re_rotation().x() == 1.0f &&
+          block->classify_rotation().x() == 1.0f) {
+        word->best_choice->MarkLSTMSubscripts(*word->box_word, *page_res_it.row()->row);
+      }
     }
   }
 

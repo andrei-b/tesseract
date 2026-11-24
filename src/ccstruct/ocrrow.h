@@ -28,6 +28,7 @@
 
 #include <cstdint> // for int16_t, int32_t
 #include <cstdio>  // for FILE
+#include <vector>
 
 namespace tesseract {
 
@@ -35,6 +36,17 @@ class ICOORD;
 class TO_ROW;
 
 struct PARA;
+
+// Bounds in original bottom-up image coordinates. The neighbors constrain a
+// local reread so it cannot remove punctuation or part of an adjacent word.
+struct SubscriptPair {
+  TBOX base;
+  TBOX index;
+  int previous_right;
+  int next_left;
+};
+void CollectScriptBlobs(WERD *word, std::vector<TBOX> *boxes);
+std::vector<SubscriptPair> FindSubscriptPairs(std::vector<TBOX> boxes);
 
 class ROW : public ELIST<ROW>::LINK {
   friend void tweak_row_baseline(ROW *, double, double);
@@ -57,6 +69,8 @@ public:
   WERD_LIST *word_list() { // get words
     return &words;
   }
+
+  bool HasRepeatedSubscripts();
 
   float base_line(        // compute baseline
       float xpos) const { // at the position
