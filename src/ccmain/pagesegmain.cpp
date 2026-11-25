@@ -171,7 +171,7 @@ int Tesseract::SegmentPage(const char *input_file, BLOCK_LIST *blocks, Tesseract
 
   textord_.TextordPage(pageseg_mode, reskew_, width, height, pix_binary_, pix_thresholds_,
                        pix_grey_, splitting || cjk_mode, &diacritic_blobs, blocks, &to_blocks, &gradient_,
-                       RecoverSubscriptsEnabled());
+                       lstm_recover_subscripts && SupportsSubscriptRecovery());
   return auto_page_seg_ret_val;
 }
 

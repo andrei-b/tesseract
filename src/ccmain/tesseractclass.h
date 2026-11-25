@@ -269,8 +269,8 @@ public:
     return &textord_;
   }
 
-  bool RecoverSubscriptsEnabled() const {
-    return lstm_recover_subscripts && tessedit_ocr_engine_mode == OEM_LSTM_ONLY &&
+  bool SupportsSubscriptRecovery() const {
+    return tessedit_ocr_engine_mode == OEM_LSTM_ONLY &&
            !right_to_left() && (tessedit_pageseg_mode == PSM_SINGLE_LINE ||
                                 tessedit_pageseg_mode == PSM_SINGLE_BLOCK ||
                                 tessedit_pageseg_mode == PSM_AUTO);
@@ -962,6 +962,7 @@ public:
   STRING_VAR_H(page_separator);
   BOOL_VAR_H(lstm_detect_subscripts);
   BOOL_VAR_H(lstm_recover_subscripts);
+  BOOL_VAR_H(lstm_reread_subscripts);
   INT_VAR_H(lstm_choice_mode);
   INT_VAR_H(lstm_choice_iterations);
   double_VAR_H(lstm_rating_coefficient);

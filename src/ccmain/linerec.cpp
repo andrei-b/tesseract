@@ -225,15 +225,13 @@ ImageData *Tesseract::GetRectImage(const TBOX &box, const BLOCK &block, int padd
   return new ImageData(vertical_text, box_pix);
 }
 
-// Reread two distinct ink components on a common baseline. The synthetic
-// coordinates are private to this inference; original boxes are restored
-// before normal word alignment. The binary image is borrowed from textord.
-static Image ScaledGlyph(Image binary, const TBOX &box, int height) {
-  if (!TBOX(0, 0, pixGetWidth(binary), pixGetHeight(binary)).contains(box)) {
+// Extract one ink component from a borrowed page in bottom-up coordinates.
+static Image ScaledGlyph(Image page, const TBOX &box, int height) {
+  if (!page || !TBOX(0, 0, pixGetWidth(page), pixGetHeight(page)).contains(box)) {
     return nullptr;
   }
-  Box *rect = boxCreate(box.left(), pixGetHeight(binary) - box.top(), box.width(), box.height());
-  Image glyph = pixClipRectangle(binary, rect, nullptr);
+  Box *rect = boxCreate(box.left(), pixGetHeight(page) - box.top(), box.width(), box.height());
+  Image glyph = pixClipRectangle(page, rect, nullptr);
   boxDestroy(&rect);
   if (!glyph) {
     return nullptr;
@@ -302,17 +300,124 @@ static void MarkAlignedPair(WERD_RES *word, const SubscriptPair &pair, const Dic
   }
 }
 
-// Retry only a disagreement in segmentation: two ink glyphs decoded as
-// one character, or as a base plus multiple punctuation fragments. A single
-// trailing comma already accounts for the second glyph and may be genuine.
-static void RecoverSubscriptWords(LSTMRecognizer *recognizer, Image binary, WERD *input,
+// Read the lowered ink without its base, preserving the decoder's real
+// alternatives for callers that request symbol choices.
+static UNICHAR_ID ReadIsolatedIndex(LSTMRecognizer *recognizer, Image page, const TBOX &box,
+                                    int height, int choice_mode, int iterations,
+                                    PointerVector<WERD_RES> *result) {
+  Image glyph = ScaledGlyph(page, box, height);
+  if (!glyph) {
+    return INVALID_UNICHAR_ID;
+  }
+  Image padded = pixAddBorder(glyph, height / 4, 255);
+  glyph.destroy();
+  if (!padded) {
+    return INVALID_UNICHAR_ID;
+  }
+  TBOX bounds(0, 0, pixGetWidth(padded), pixGetHeight(padded));
+  ImageData sample(false, padded);
+  recognizer->RecognizeLine(sample, 0, false, kWorstDictCertainty / kCertaintyScale, bounds,
+                            result, choice_mode, iterations);
+  if (result->size() != 1 || !(*result)[0]->best_choice ||
+      (*result)[0]->best_choice->length() != 1) {
+    return INVALID_UNICHAR_ID;
+  }
+  const auto &choice = *(*result)[0]->best_choice;
+  const auto &cs = recognizer->GetUnicharset();
+  auto id = choice.unichar_id(0);
+  if (choice.certainty(0) < -0.8f || (!cs.get_isalpha(id) && !cs.get_isdigit(id))) {
+    return INVALID_UNICHAR_ID;
+  }
+  return id;
+}
+
+static bool IsLoweredSlot(const SubscriptPair &pair, const ROW &row, const WERD_CHOICE &word,
+                          const UNICHARSET &cs, const Dict *dict) {
+  const auto index = word.unichar_id(1);
+  if (cs.get_isalpha(index) && (!dict || dict->valid_word(word))) {
+    return false;
+  }
+  const float h = pair.base.height();
+  const auto &b = pair.index;
+  // A comma can descend as far as a numeral. Require letter-sized ink
+  // above the local base bottom before reinterpreting punctuation.
+  if (cs.get_ispunctuation(index) && b.top() - pair.base.bottom() < h / 3) {
+    return false;
+  }
+  return b.height() >= 0.45f * h && b.width() >= 0.22f * h &&
+         row.base_line(b.x_middle()) - b.bottom() >= 0.07f * h &&
+         pair.base.top() - b.top() >= 0.36f * h;
+}
+
+// LSTM words have one ratings cell per character. Transfer the isolated
+// classification to that cell, then rebuild both the raw and cooked choices.
+static void SetIndexFromGlyph(WERD_RES *glyph, int choice_mode, WERD_RES *word) {
+  std::swap((*word->ratings)(1, 1), (*glyph->ratings)(0, 0));
+  BLOB_CHOICE_IT(word->ratings->get(1, 1)).data()->set_matrix_cell(1, 1);
+  word->ClearWordChoices();
+  word->FakeWordFromRatings(TOP_CHOICE_PERM);
+  if (!choice_mode) {
+    return;
+  }
+  // Both inputs end at the glyph in question. CTC may include an initial
+  // space, or omit choices at the end; preserve those offsets.
+  glyph->CTC_symbol_choices.resize(glyph->end);
+  word->CTC_symbol_choices.resize(word->end);
+  word->CTC_symbol_choices.back() = std::move(glyph->CTC_symbol_choices.back());
+  glyph->segmented_timesteps.resize(glyph->end);
+  word->segmented_timesteps.resize(word->end);
+  word->segmented_timesteps.back() = std::move(glyph->segmented_timesteps.back());
+  word->timesteps.clear();
+  for (const auto &segment : word->segmented_timesteps) {
+    word->timesteps.insert(word->timesteps.end(), segment.begin(), segment.end());
+  }
+}
+
+// A two-character word already has decoder boxes. Replace only the second
+// classifier result, keeping the base, spacing and original geometry.
+static void RereadLoweredSlot(LSTMRecognizer *recognizer, Image binary, Image original,
+                              const SubscriptPair &pair, int choice_mode, int iterations,
+                              WERD_RES *word) {
+  C_BLOB_IT blobs(word->word->cblob_list());
+  if (blobs.length() != 2) {
+    return;
+  }
+  TBOX first = blobs.data()->bounding_box();
+  blobs.forward();
+  TBOX last = blobs.data()->bounding_box();
+  if (first.left() > pair.base.x_middle() || pair.base.x_middle() >= first.right() ||
+      last.left() > pair.index.x_middle() || pair.index.x_middle() >= last.right()) {
+    return;
+  }
+  PointerVector<WERD_RES> binary_read, gray_read;
+  auto id = ReadIsolatedIndex(recognizer, binary, pair.index, 48, 0, 0, &binary_read);
+  if (id == INVALID_UNICHAR_ID ||
+      ReadIsolatedIndex(recognizer, original, pair.index, 40, choice_mode, iterations,
+                        &gray_read) != id) {
+    return;
+  }
+  if (id != word->best_choice->unichar_id(1)) {
+    // A first-pass digit is already a plausible index. Avoid exchanging one
+    // plausible digit for a different reading on a smaller crop.
+    if (word->uch_set->get_isdigit(word->best_choice->unichar_id(1))) {
+      return;
+    }
+    SetIndexFromGlyph(gray_read[0], choice_mode, word);
+  }
+  word->best_choice->SetBlobPosition(1, SP_SUBSCRIPT);
+}
+
+// Existing decoder slots keep their original segmentation. Missing or split
+// slots use the separate base-and-index recovery path.
+static void RecoverSubscriptWords(LSTMRecognizer *recognizer, Image binary, Image original,
+                                  WERD *input, const ROW &row, bool recover, bool reread,
                                   int choice_mode, int iterations, PointerVector<WERD_RES> *words) {
   std::vector<TBOX> boxes;
   CollectScriptBlobs(input, &boxes);
   const auto pairs = FindSubscriptPairs(std::move(boxes));
   const UNICHARSET &charset = recognizer->GetUnicharset();
   size_t w = 0;
-  int tries = 0;
+  int recovery_tries = 0, slot_tries = 0;
   for (const auto &pair : pairs) {
     const TBOX &base = pair.base, &index = pair.index;
     while (w < words->size() && (*words)[w]->word->bounding_box().right() <= base.x_middle()) {
@@ -322,9 +427,11 @@ static void RecoverSubscriptWords(LSTMRecognizer *recognizer, Image binary, WERD
       break;
     }
     WERD_RES *old = (*words)[w];
-    MarkAlignedPair(old, pair, recognizer->GetDict());
+    if (recover) {
+      MarkAlignedPair(old, pair, recognizer->GetDict());
+    }
     int clearance = std::max(2, base.height() / 7);
-    if (tries >= 8 || base.right() > index.left() || pair.previous_right > base.left() - clearance ||
+    if (base.right() > index.left() || pair.previous_right > base.left() - clearance ||
         pair.next_left < index.right() + clearance) {
       continue;
     }
@@ -334,8 +441,18 @@ static void RecoverSubscriptWords(LSTMRecognizer *recognizer, Image binary, WERD
       continue;
     }
     WERD_CHOICE *first = old->best_choice;
-    if (!first || (first->length() != 1 && first->length() != 3) ||
-        !charset.get_isalpha(first->unichar_id(0))) {
+    if (!first || first->empty() || !charset.get_isalpha(first->unichar_id(0))) {
+      continue;
+    }
+    if (first->length() == 2) {
+      if (reread && slot_tries < 8 &&
+          IsLoweredSlot(pair, row, *first, charset, recognizer->GetDict())) {
+        ++slot_tries;
+        RereadLoweredSlot(recognizer, binary, original, pair, choice_mode, iterations, old);
+      }
+      continue;
+    }
+    if (!recover || recovery_tries >= 8 || (first->length() != 1 && first->length() != 3)) {
       continue;
     }
     if (first->length() == 3 && (!charset.get_ispunctuation(first->unichar_id(1)) ||
@@ -347,7 +464,7 @@ static void RecoverSubscriptWords(LSTMRecognizer *recognizer, Image binary, WERD
     if (!aligned) {
       continue;
     }
-    ++tries;
+    ++recovery_tries;
     TBOX synthetic(0, 0, pixGetWidth(aligned), pixGetHeight(aligned));
     ImageData sample(false, aligned); // takes ownership
     PointerVector<WERD_RES> retry;
@@ -404,9 +521,10 @@ void Tesseract::LSTMRecognizeWord(const BLOCK &block, ROW *row, WERD_RES *word,
                                   kWorstDictCertainty / kCertaintyScale, word_box, words,
                                   lstm_choice_mode, lstm_choice_iterations);
   delete im_data;
-  if (RecoverSubscriptsEnabled() && !words->empty() && block.re_rotation().x() == 1.0f &&
-      block.classify_rotation().x() == 1.0f) {
-    RecoverSubscriptWords(lstm_recognizer_, pix_binary_, word->word, lstm_choice_mode,
+  if ((lstm_recover_subscripts || lstm_reread_subscripts) && SupportsSubscriptRecovery() &&
+      !words->empty() && block.re_rotation().x() == 1.0f && block.classify_rotation().x() == 1.0f) {
+    RecoverSubscriptWords(lstm_recognizer_, pix_binary_, BestPix(), word->word, *row,
+                          lstm_recover_subscripts, lstm_reread_subscripts, lstm_choice_mode,
                           lstm_choice_iterations, words);
   }
   SearchWords(words);
