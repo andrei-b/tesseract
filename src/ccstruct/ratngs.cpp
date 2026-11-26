@@ -22,6 +22,8 @@
 
 #include "ratngs.h"
 
+#include <string_view>
+
 #include "blobs.h"
 #include "boxword.h"
 #include "matrix.h"
@@ -654,6 +656,58 @@ void WERD_CHOICE::MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row) {
       }
     }
     start = end;
+  }
+}
+
+void WERD_CHOICE::MarkLSTMSuperscripts(const BoxWord &boxes, const ROW &row) {
+  if (boxes.length() != length() || row.x_height() <= 0) {
+    return;
+  }
+  const float x_height = row.x_height();
+  const auto alnum = [this](unsigned i) {
+    const auto id = unichar_id(i);
+    return unicharset_->get_isalpha(id) || unicharset_->get_isdigit(id);
+  };
+  const auto closing = [this](unsigned i) {
+    const std::string_view symbol = unicharset_->id_to_unichar(unichar_id(i));
+    return symbol == ")" || symbol == "]" || symbol == "}";
+  };
+  for (unsigned i = 1; i < length(); ++i) {
+    if (BlobPosition(i) != SP_NORMAL || !alnum(i)) {
+      continue;
+    }
+    unsigned anchor = i;
+    while (anchor > 0 && (BlobPosition(anchor - 1) == SP_SUPERSCRIPT ||
+                          BlobPosition(anchor - 1) == SP_SUBSCRIPT)) {
+      --anchor;
+    }
+    if (anchor == i && i > 1) {
+      // A raised parenthesized index may start with a delimiter.
+      const std::string_view before = unicharset_->id_to_unichar(unichar_id(i - 1));
+      if (before == "(" || before == "[") {
+        --anchor;
+      }
+    }
+    if (anchor == 0 || BlobPosition(anchor - 1) != SP_NORMAL ||
+        !(alnum(anchor - 1) || closing(anchor - 1))) {
+      continue;
+    }
+    const TBOX &base = boxes.BlobBox(anchor - 1);
+    const TBOX &previous = boxes.BlobBox(i - 1);
+    const TBOX &raised = boxes.BlobBox(i);
+    const float base_depth = row.base_line(base.x_middle()) - base.bottom();
+    const float rise = raised.bottom() - row.base_line(raised.x_middle());
+    const float gap = raised.left() - previous.right();
+    const float max_relative_height = unicharset_->get_isdigit(unichar_id(i)) ? 1.10f : 0.96f;
+    if (base.height() >= 0.62f * x_height && std::abs(base_depth) <= 0.48f * x_height &&
+        raised.height() >= 0.35f * x_height &&
+        raised.height() <= std::min(max_relative_height * base.height(), 1.04f * x_height) &&
+        rise >= 0.29f * x_height && raised.bottom() - base.bottom() >= 0.32f * x_height &&
+        (closing(anchor - 1) || raised.top() >= base.top() - 0.08f * x_height) &&
+        raised.x_middle() > previous.x_middle() && gap >= -0.25f * x_height &&
+        gap <= 0.95f * x_height) {
+      script_pos_[i] = SP_SUPERSCRIPT;
+    }
   }
 }
 

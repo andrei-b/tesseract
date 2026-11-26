@@ -467,6 +467,7 @@ bool Tesseract::recog_all_words(PAGE_RES *page_res, ETEXT_DESC *monitor,
       if (block != nullptr && block->re_rotation().x() == 1.0f &&
           block->classify_rotation().x() == 1.0f) {
         word->best_choice->MarkLSTMSubscripts(*word->box_word, *page_res_it.row()->row);
+        word->best_choice->MarkLSTMSuperscripts(*word->box_word, *page_res_it.row()->row);
       }
     }
   }

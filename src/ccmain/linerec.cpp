@@ -341,7 +341,9 @@ static bool IsLoweredSlot(const SubscriptPair &pair, const ROW &row, const WERD_
   const auto &b = pair.index;
   // A comma can descend as far as a numeral. Require letter-sized ink
   // above the local base bottom before reinterpreting punctuation.
-  if (cs.get_ispunctuation(index) && b.top() - pair.base.bottom() < h / 3) {
+  // Ink edges are measured in whole pixels. Round the required overlap down
+  // so an index on a 28-pixel capital can qualify with nine pixels of ink.
+  if (cs.get_ispunctuation(index) && b.top() - pair.base.bottom() < pair.base.height() / 3) {
     return false;
   }
   return b.height() >= 0.45f * h && b.width() >= 0.22f * h &&

@@ -141,8 +141,10 @@ char *TessBaseAPI::GetHOCRText(ETEXT_DESC *monitor, int page_number) {
   const char *paragraph_lang = nullptr;
   bool font_info = false;
   bool hocr_boxes = false;
+  bool detect_inline_scripts = false;
   GetBoolVariable("hocr_font_info", &font_info);
   GetBoolVariable("hocr_char_boxes", &hocr_boxes);
+  GetBoolVariable("lstm_detect_subscripts", &detect_inline_scripts);
 
   if (input_file_.empty()) {
     SetInputName(nullptr);
@@ -321,7 +323,21 @@ char *TessBaseAPI::GetHOCRText(ETEXT_DESC *monitor, int page_number) {
                    << left << " " << top << " " << right << " " << bottom
                    << "; x_conf " << res_it->Confidence(RIL_SYMBOL) << "'>";
         }
+        const char *tag = nullptr;
+        if (hocr_boxes && detect_inline_scripts) {
+          if (res_it->SymbolIsSuperscript()) {
+            tag = "sup";
+          } else if (res_it->SymbolIsSubscript()) {
+            tag = "sub";
+          }
+        }
+        if (tag != nullptr) {
+          hocr_str << '<' << tag << '>';
+        }
         hocr_str << HOcrEscape(grapheme.get()).c_str();
+        if (tag != nullptr) {
+          hocr_str << "</" << tag << '>';
+        }
         if (hocr_boxes) {
           hocr_str << "</span>";
           tesseract::ChoiceIterator ci(*res_it);

@@ -427,7 +427,7 @@ Tesseract::Tesseract()
     , STRING_MEMBER(page_separator, "\f", "Page separator (default is form feed control character)",
                     this->params())
     , BOOL_MEMBER(lstm_detect_subscripts, false,
-                  "Mark lowered indices in horizontal LSTM text using the symbol iterator",
+                  "Mark inline script positions in horizontal LSTM text using the symbol iterator",
                   this->params())
     , BOOL_MEMBER(lstm_recover_subscripts, false,
                   "Recover lowered glyphs from ink components in horizontal LSTM text",

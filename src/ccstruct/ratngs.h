@@ -560,6 +560,7 @@ public:
   // Sets all the script_pos_ positions to the given position.
   void SetAllScriptPositions(ScriptPos position);
   void MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row);
+  void MarkLSTMSuperscripts(const BoxWord &boxes, const ROW &row);
 
   static ScriptPos ScriptPositionOf(bool print_debug, const UNICHARSET &unicharset,
                                     const TBOX &blob_box, UNICHAR_ID unichar_id);
