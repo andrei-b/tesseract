@@ -52,7 +52,183 @@ const char *const kBackUpConfigFile = "tempconfigdata.config";
 const double kMinRefitXHeightFraction = 0.5;
 #endif // ! DISABLED_LEGACY_ENGINE
 
+#include <string_view>
+
 namespace tesseract {
+
+struct EquationBaseline {
+  float offset = 0.0f;
+  bool generalized = false;
+};
+
+// A displayed expression may have a text baseline fitted through its indices.
+// Verify a candidate math axis against normal-height operands on both sides.
+static float SupportedEquationOffset(const ROW &row, const TBOX &axis,
+                                     const std::vector<TBOX> &operands) {
+  const float xheight = row.x_height();
+  const float offset = 0.5f * (axis.top() + axis.bottom()) - 0.5f * xheight -
+                       row.base_line(axis.x_middle());
+  if (offset < 0.25f * xheight || offset > 0.9f * xheight) {
+    return 0.0f;
+  }
+  bool left = false;
+  bool right = false;
+  for (const TBOX &operand : operands) {
+    const float dx = operand.x_middle() - axis.x_middle();
+    const float depth = row.base_line(operand.x_middle()) + offset - operand.bottom();
+    if (std::abs(dx) <= 8.0f * xheight && std::abs(depth) <= 0.22f * xheight) {
+      left = left || operand.right() < axis.left();
+      right = right || operand.left() > axis.right();
+    }
+  }
+  return left && right ? offset : 0.0f;
+}
+
+static bool IsEquationAxis(std::string_view symbol, const TBOX &box,
+                           float xheight, bool isolated) {
+  if (box.width() < 0.35f * xheight || box.width() > 1.65f * xheight ||
+      box.height() > 1.25f * xheight) {
+    return false;
+  }
+  if (symbol == "-" || symbol == "−") {
+    // A connected ASCII hyphen is much more likely to be part of a word.
+    return (isolated || symbol == "−") && box.height() <= 0.28f * xheight;
+  }
+  if (box.height() < 0.30f * xheight) {
+    return false;
+  }
+  return symbol == "+" || symbol == "±" || symbol == "×" || symbol == "<" ||
+         symbol == ">" || symbol == "≤" || symbol == "≥" || symbol == "≈" ||
+         symbol == "≃" || symbol == "≡" || symbol == "≠" || symbol == "∼";
+}
+
+static EquationBaseline DisplayedEquationOffset(ROW_RES *row_res) {
+  const ROW &row = *row_res->row;
+  const float xheight = row.x_height();
+  if (xheight < 8.0f) {
+    return {};
+  }
+
+  std::vector<TBOX> equalities;
+  std::vector<TBOX> other_operators;
+  std::vector<TBOX> operands;
+  unsigned words = 0;
+  unsigned prose_words = 0;
+  unsigned long_lowercase_runs = 0;
+  WERD_RES_IT it(&row_res->word_res_list);
+  for (it.mark_cycle_pt(); !it.cycled_list(); it.forward()) {
+    const WERD_RES &word = *it.data();
+    if (!word.best_choice || !word.box_word || word.part_of_combo) {
+      continue;
+    }
+    const WERD_CHOICE &choice = *word.best_choice;
+    const BoxWord &boxes = *word.box_word;
+    if (boxes.length() != choice.length() || choice.empty()) {
+      continue;
+    }
+    if (++words > 16) {
+      return {};
+    }
+    const UNICHARSET &characters = *choice.unicharset();
+    bool lowercase_word = choice.length() >= 4;
+    unsigned lowercase_run = 0;
+    for (unsigned i = 0; i < choice.length(); ++i) {
+      const auto id = choice.unichar_id(i);
+      const TBOX &box = boxes.BlobBox(i);
+      const bool lowercase = characters.get_islower(id);
+      lowercase_word = lowercase_word && lowercase;
+      lowercase_run = lowercase ? lowercase_run + 1 : 0;
+      if (lowercase_run == 4) {
+        ++long_lowercase_runs;
+      }
+      const std::string_view symbol = characters.id_to_unichar(id);
+      if (symbol == "=" && box.width() >= 0.4f * xheight &&
+          box.height() <= 0.65f * xheight) {
+        equalities.push_back(box);
+      } else if (IsEquationAxis(symbol, box, xheight, choice.length() == 1)) {
+        other_operators.push_back(box);
+      }
+      if ((characters.get_isalpha(id) || characters.get_isdigit(id)) &&
+          box.height() >= 0.65f * xheight && box.height() <= 1.65f * xheight) {
+        operands.push_back(box);
+      }
+    }
+    if (lowercase_word && ++prose_words > 1) {
+      return {};
+    }
+  }
+
+  for (const TBOX &axis : equalities) {
+    if (const float offset = SupportedEquationOffset(row, axis, operands); offset != 0.0f) {
+      return {offset, false};
+    }
+  }
+  // The alternate signs are more ambiguous in prose. Count letter runs
+  // even when OCR attaches punctuation or joins multiple tokens.
+  if (long_lowercase_runs <= 1) {
+    for (const TBOX &axis : other_operators) {
+      if (const float offset = SupportedEquationOffset(row, axis, operands); offset != 0.0f) {
+        return {offset, true};
+      }
+    }
+  }
+  return {};
+}
+
+static void MarkDisplayedEquationSubscripts(WERD_CHOICE *choice, const BoxWord &boxes,
+                                             const ROW &row, EquationBaseline baseline) {
+  const float offset = baseline.offset;
+  if (offset == 0.0f || boxes.length() != choice->length()) {
+    return;
+  }
+  const float xheight = row.x_height();
+  const UNICHARSET &characters = *choice->unicharset();
+  for (unsigned start = 0; start + 1 < boxes.length(); ++start) {
+    const TBOX &base = boxes.BlobBox(start);
+    const float base_depth = row.base_line(base.x_middle()) + offset - base.bottom();
+    if (choice->BlobPosition(start) != SP_NORMAL ||
+        !characters.get_isalpha(choice->unichar_id(start)) ||
+        base.height() < 0.65f * xheight || base.height() > 1.65f * xheight ||
+        std::abs(base_depth) > 0.22f * xheight) {
+      continue;
+    }
+
+    // The top must also be below the usual lowercase band. A descender
+    // can end low while its body is still on the regular baseline.
+    unsigned end = start + 1;
+    float first_depth = 0.0f;
+    for (; end < boxes.length() && end - start <= 6; ++end) {
+      const auto id = choice->unichar_id(end);
+      const TBOX &index = boxes.BlobBox(end);
+      const TBOX &previous = boxes.BlobBox(end - 1);
+      const float depth = row.base_line(index.x_middle()) + offset - index.bottom();
+      const float gap = index.left() - previous.right();
+      const bool initial_capital = end == start + 1 && characters.get_isupper(id);
+      if (choice->BlobPosition(end) != SP_NORMAL ||
+          !(characters.get_isdigit(id) || characters.get_islower(id) || initial_capital) ||
+          depth < 0.28f * xheight || depth > 0.85f * xheight ||
+          depth - base_depth < 0.30f * xheight ||
+          depth - index.height() < -0.75f * xheight ||
+          index.height() < 0.35f * xheight || index.height() > 1.30f * xheight ||
+          base.top() - index.top() < 0.18f * xheight ||
+          index.x_middle() <= previous.x_middle() || gap < -0.22f * xheight ||
+          gap > 0.50f * xheight ||
+          (end > start + 1 && std::abs(depth - first_depth) > 0.22f * xheight)) {
+        break;
+      }
+      if (end == start + 1) {
+        first_depth = depth;
+      }
+    }
+    if (end == start + 2 && characters.get_isupper(choice->unichar_id(start + 1))) {
+      continue;
+    }
+    for (unsigned i = start + 1; i < end; ++i) {
+      choice->SetBlobPosition(i, SP_SUBSCRIPT);
+    }
+    start = end - 1;
+  }
+}
 
 /**
  * Make a word from the selected blobs and run Tess on them.
@@ -452,6 +628,8 @@ bool Tesseract::recog_all_words(PAGE_RES *page_res, ETEXT_DESC *monitor,
   const auto pageseg_mode = static_cast<PageSegMode>(static_cast<int>(tessedit_pageseg_mode));
   textord_.CleanupSingleRowResult(pageseg_mode, page_res);
 
+  ROW_RES *last_script_row = nullptr;
+  EquationBaseline equation_offset;
   // Remove empty words, as these mess up the result iterators.
   for (page_res_it.restart_page(); page_res_it.word() != nullptr; page_res_it.forward()) {
     const WERD_RES *word = page_res_it.word();
@@ -468,6 +646,13 @@ bool Tesseract::recog_all_words(PAGE_RES *page_res, ETEXT_DESC *monitor,
           block->classify_rotation().x() == 1.0f) {
         word->best_choice->MarkLSTMSubscripts(*word->box_word, *page_res_it.row()->row);
         word->best_choice->MarkLSTMSuperscripts(*word->box_word, *page_res_it.row()->row);
+        ROW_RES *script_row = page_res_it.row();
+        if (script_row != last_script_row) {
+          equation_offset = DisplayedEquationOffset(script_row);
+          last_script_row = script_row;
+        }
+        MarkDisplayedEquationSubscripts(word->best_choice, *word->box_word, *script_row->row,
+                                        equation_offset);
       }
     }
   }

@@ -654,6 +654,18 @@ void WERD_CHOICE::MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row) {
         // A lowered digit can be taller than a lowercase base at x-height.
         // The baseline shift and lowered top still have to match.
         float max_height = (unicharset_->get_isdigit(id) || three_letter_index) ? 1.15f : 0.82f;
+        // A strongly lowered glyph can be taller than its base. Check its
+        // top against the row x-height so ordinary descenders stay on baseline.
+        const bool clearly_lowered_pair =
+            run_length == 2 && !comma && unicharset_->get_isalpha(unichar_id(start)) &&
+            (unicharset_->get_isdigit(id) || unicharset_->get_islower(id)) &&
+            std::abs(base_depth) <= 0.32f * height && depth - base_depth >= 0.32f * height &&
+            depth - index.height() >= -0.80f * row.x_height() &&
+            base.top() - index.top() >= 0.28f * height;
+        if (clearly_lowered_pair) {
+          max_height = 1.32f;
+        }
+        const float max_shift = clearly_lowered_pair ? 0.85f : 0.75f;
         int gap = index.left() - previous.right();
         if (!unicharset_->get_isalpha(unichar_id(start)) &&
             !unicharset_->get_isdigit(unichar_id(i))) {
@@ -668,7 +680,7 @@ void WERD_CHOICE::MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row) {
         lowered = BlobPosition(i) == SP_NORMAL && index.height() >= 0.32f * height &&
                   index.height() <= max_height * height && index.x_middle() > previous.x_middle() &&
                   gap >= -0.25f * height && gap <= 0.5f * height &&
-                  shift >= 0.16f * height && shift <= 0.75f * height &&
+                  shift >= 0.16f * height && shift <= max_shift * height &&
                   depth >= -0.05f * height && base.top() - index.top() >= 0.15f * height;
       }
       if (lowered && (!three_letter_index || deepest_index - shallowest_index <= 0.22f * height)) {
