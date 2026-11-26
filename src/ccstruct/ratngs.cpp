@@ -631,8 +631,9 @@ void WERD_CHOICE::MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row) {
         float depth = row.base_line(index.x_middle()) - index.bottom();
         // The bottom of a descending base can lie below the row baseline.
         float shift = depth - std::min(base_depth, height * 0.08f);
-        // A digit can be as tall as a lowercase base even at index size.
-        float max_height = unicharset_->get_isdigit(unichar_id(i)) ? 1.05f : 0.82f;
+        // A lowered digit can be taller than a lowercase base at x-height.
+        // The baseline shift and lowered top still have to match.
+        float max_height = unicharset_->get_isdigit(unichar_id(i)) ? 1.15f : 0.82f;
         int gap = index.left() - previous.right();
         if (!unicharset_->get_isalpha(unichar_id(start)) &&
             !unicharset_->get_isdigit(unichar_id(i))) {
