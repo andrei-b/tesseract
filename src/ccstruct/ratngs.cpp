@@ -620,20 +620,40 @@ void WERD_CHOICE::MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row) {
     if (comma) {
       ++end;
     }
-    if (end - start == 2 || end - start == 3) {
+    const unsigned run_length = end - start;
+    const bool three_letter_index =
+        run_length == 4 && unicharset_->get_isalpha(unichar_id(start));
+    if (run_length == 2 || run_length == 3 || three_letter_index) {
       const TBOX &base = boxes.BlobBox(start);
       float height = base.height();
       float base_depth = row.base_line(base.x_middle()) - base.bottom();
       bool lowered = height >= 5;
+      float shallowest_index = 0.0f;
+      float deepest_index = 0.0f;
       for (unsigned i = start + 1; lowered && i < end; ++i) {
         const TBOX &index = boxes.BlobBox(i);
         const TBOX &previous = boxes.BlobBox(i - 1);
         float depth = row.base_line(index.x_middle()) - index.bottom();
         // The bottom of a descending base can lie below the row baseline.
         float shift = depth - std::min(base_depth, height * 0.08f);
+        const auto id = unichar_id(i);
+        if (three_letter_index) {
+          // Longer labels can include ascenders such as f in ref. Require
+          // all three letters to sit together below the base character.
+          if (!unicharset_->get_islower(id) || depth - base_depth < 0.20f * height) {
+            lowered = false;
+            break;
+          }
+          if (i == start + 1) {
+            shallowest_index = deepest_index = depth;
+          } else {
+            shallowest_index = std::min(shallowest_index, depth);
+            deepest_index = std::max(deepest_index, depth);
+          }
+        }
         // A lowered digit can be taller than a lowercase base at x-height.
         // The baseline shift and lowered top still have to match.
-        float max_height = unicharset_->get_isdigit(unichar_id(i)) ? 1.15f : 0.82f;
+        float max_height = (unicharset_->get_isdigit(id) || three_letter_index) ? 1.15f : 0.82f;
         int gap = index.left() - previous.right();
         if (!unicharset_->get_isalpha(unichar_id(start)) &&
             !unicharset_->get_isdigit(unichar_id(i))) {
@@ -651,7 +671,7 @@ void WERD_CHOICE::MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row) {
                   shift >= 0.16f * height && shift <= 0.75f * height &&
                   depth >= -0.05f * height && base.top() - index.top() >= 0.15f * height;
       }
-      if (lowered) {
+      if (lowered && (!three_letter_index || deepest_index - shallowest_index <= 0.22f * height)) {
         for (unsigned i = start + 1; i < end; ++i) {
           script_pos_[i] = SP_SUBSCRIPT;
         }
