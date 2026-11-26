@@ -639,7 +639,8 @@ void WERD_CHOICE::MarkLSTMSubscripts(const BoxWord &boxes, const ROW &row) {
           lowered = false;
           break;
         }
-        if (comma && (index.width() < 0.25f * height || index.height() < 0.45f * height)) {
+        if (comma && (index.width() < 0.25f * height || index.height() < 0.45f * height ||
+                      index.top() - base.bottom() < base.height() / 3)) {
           lowered = false;
           break;
         }

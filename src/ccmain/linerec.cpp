@@ -409,6 +409,64 @@ static void RereadLoweredSlot(LSTMRecognizer *recognizer, Image binary, Image or
   word->best_choice->SetBlobPosition(1, SP_SUBSCRIPT);
 }
 
+// Use the decoder's two separate slots to find the original ink even
+// when a digit next to an x-height base is too tall for FindSubscriptPairs.
+static TBOX InkInsideSlot(const std::vector<TBOX> &ink, const TBOX &slot) {
+  TBOX result;
+  for (const auto &blob : ink) {
+    if (slot.left() <= blob.x_middle() && blob.x_middle() < slot.right() &&
+        slot.bottom() <= blob.y_middle() && blob.y_middle() < slot.top()) {
+      result += blob;
+    }
+  }
+  return result;
+}
+
+static void RereadTallPunctuationSlots(LSTMRecognizer *recognizer, Image binary, Image original,
+                                       const std::vector<TBOX> &ink, int choice_mode, int iterations,
+                                       PointerVector<WERD_RES> *words) {
+  const UNICHARSET &charset = recognizer->GetUnicharset();
+  const auto comma = charset.unichar_to_id(",");
+  const auto semicolon = charset.unichar_to_id(";");
+  int attempts = 0;
+  for (size_t w = 0; w < words->size(); ++w) {
+    WERD_RES *word = (*words)[w];
+    const auto *choice = word->best_choice;
+    if (!choice || choice->length() != 2 || !charset.get_isalpha(choice->unichar_id(0))) {
+      continue;
+    }
+    const auto mark = choice->unichar_id(1);
+    if (mark != comma && mark != semicolon) {
+      continue;
+    }
+    C_BLOB_IT slots(word->word->cblob_list());
+    if (slots.length() != 2) {
+      continue;
+    }
+    const TBOX first = slots.data()->bounding_box();
+    slots.forward();
+    const TBOX second = slots.data()->bounding_box();
+    const TBOX base = InkInsideSlot(ink, first);
+    const TBOX index = InkInsideSlot(ink, second);
+    if (base.null_box() || index.null_box()) {
+      continue;
+    }
+    const float h = base.height();
+    const int drop = base.bottom() - index.bottom();
+    const int gap = index.left() - base.right();
+    if (h < 9 || index.height() < 0.72f * h || index.height() > 1.40f * h ||
+        index.width() < 0.20f * h || index.width() > h ||
+        base.top() - index.top() < 0.15f * h || index.top() - base.bottom() < 0.40f * h ||
+        drop < 0.15f * h || drop > 0.75f * h || gap < 0 || gap > 0.43f * h) {
+      continue;
+    }
+    RereadLoweredSlot(recognizer, binary, original, {base, index, 0, 0}, choice_mode, iterations, word);
+    if (++attempts >= 8) {
+      return;
+    }
+  }
+}
+
 // Existing decoder slots keep their original segmentation. Missing or split
 // slots use the separate base-and-index recovery path.
 static void RecoverSubscriptWords(LSTMRecognizer *recognizer, Image binary, Image original,
@@ -416,7 +474,7 @@ static void RecoverSubscriptWords(LSTMRecognizer *recognizer, Image binary, Imag
                                   int choice_mode, int iterations, PointerVector<WERD_RES> *words) {
   std::vector<TBOX> boxes;
   CollectScriptBlobs(input, &boxes);
-  const auto pairs = FindSubscriptPairs(std::move(boxes));
+  const auto pairs = FindSubscriptPairs(boxes);
   const UNICHARSET &charset = recognizer->GetUnicharset();
   size_t w = 0;
   int recovery_tries = 0, slot_tries = 0;
@@ -490,6 +548,9 @@ static void RecoverSubscriptWords(LSTMRecognizer *recognizer, Image binary, Imag
     retry[0]->space_certainty = old->space_certainty;
     std::swap((*words)[w], retry[0]);
     ++w;
+  }
+  if (reread) {
+    RereadTallPunctuationSlots(recognizer, binary, original, boxes, choice_mode, iterations, words);
   }
 }
 
