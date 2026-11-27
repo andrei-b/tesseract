@@ -230,6 +230,100 @@ static void MarkDisplayedEquationSubscripts(WERD_CHOICE *choice, const BoxWord &
   }
 }
 
+// A formula base can follow a regular-height prefix. Look for a contiguous
+// lowered suffix from each plausible base instead of treating the whole
+// alphanumeric word as one candidate.
+static void MarkLoweredSuffixes(WERD_CHOICE *choice, const BoxWord &boxes, const ROW &row,
+                                float offset) {
+  const float height = row.x_height();
+  if (height < 8.0f || boxes.length() != choice->length() || boxes.length() > 12) {
+    return;
+  }
+  const UNICHARSET &characters = *choice->unicharset();
+  const auto depth = [&row, offset](const TBOX &box) {
+    return row.base_line(box.x_middle()) + offset - box.bottom();
+  };
+
+  for (unsigned i = 0; i < 4 && i + 1 < boxes.length(); ++i) {
+    const TBOX &base = boxes.BlobBox(i);
+    const float base_depth = depth(base);
+    if (choice->BlobPosition(i) != SP_NORMAL ||
+        !characters.get_isalpha(choice->unichar_id(i)) ||
+        base.height() < 0.65f * height || base.height() > 1.70f * height ||
+        base.width() > 1.65f * height || std::abs(base_depth) > 0.30f * height) {
+      continue;
+    }
+
+    unsigned start = i + 1;
+    while (start + 1 < boxes.length() && start <= i + 2) {
+      const std::string_view character = characters.id_to_unichar(choice->unichar_id(start));
+      const TBOX &fragment = boxes.BlobBox(start);
+      // Only bridge parentheses that reach into the lowered band. This
+      // covers the decoder splitting a lowered index into bracket fragments.
+      if ((character != "(" && character != ")") || depth(fragment) < 0.35f * height ||
+          fragment.left() < base.right() - 0.28f * height ||
+          fragment.right() - base.right() > 1.35f * height) {
+        break;
+      }
+      ++start;
+    }
+
+    if (start == i + 1 && start + 3 < boxes.length()) {
+      const TBOX &fragment = boxes.BlobBox(start);
+      const TBOX &next = boxes.BlobBox(start + 1);
+      // A narrow, unusually tall split can overlap the start of a run such
+      // as a lowered capital followed by small letters.
+      if (fragment.height() >= 1.55f * height && fragment.width() <= 0.50f * height &&
+          fragment.right() > next.left() && depth(fragment) >= 0.35f * height &&
+          std::abs(depth(fragment) - depth(next)) <= 0.15f * height &&
+          characters.get_isupper(choice->unichar_id(start + 1))) {
+        ++start;
+      }
+    }
+
+    const bool bridged = start != i + 1;
+    if (boxes.BlobBox(start).left() - base.right() > (bridged ? 1.38f : 0.50f) * height) {
+      continue;
+    }
+    const auto first_id = choice->unichar_id(start);
+    const bool digit_first = characters.get_isdigit(first_id);
+    const bool capital_first = characters.get_isupper(first_id);
+    const float first_depth = depth(boxes.BlobBox(start));
+    unsigned end = start;
+    for (; end < boxes.length() && end < start + 6; ++end) {
+      const auto id = choice->unichar_id(end);
+      const TBOX &glyph = boxes.BlobBox(end);
+      const TBOX &previous = boxes.BlobBox(end - 1);
+      const float lowered = depth(glyph);
+      const float gap = glyph.left() - previous.right();
+      const ScriptPos position = choice->BlobPosition(end);
+      if ((position != SP_NORMAL && position != SP_SUBSCRIPT) ||
+          !(characters.get_isdigit(id) || characters.get_islower(id) ||
+            (end == start && capital_first)) ||
+          lowered < 0.36f * height || lowered > 0.94f * height ||
+          lowered - base_depth < 0.34f * height || lowered - glyph.height() < -0.74f * height ||
+          base.top() - glyph.top() < 0.23f * height ||
+          glyph.height() < 0.34f * height || glyph.height() > 1.32f * height ||
+          glyph.width() < 0.17f * height || glyph.width() > 1.35f * height ||
+          glyph.x_middle() <= previous.x_middle() ||
+          gap < -0.29f * height || gap > 0.51f * height ||
+          std::abs(lowered - first_depth) > (digit_first ? 0.35f : 0.24f) * height) {
+        break;
+      }
+    }
+
+    const unsigned count = end - start;
+    if (count == 0 || (capital_first && count < 3) ||
+        (count == 1 && !digit_first && !bridged)) {
+      continue;
+    }
+    for (unsigned j = start; j < end; ++j) {
+      choice->SetBlobPosition(j, SP_SUBSCRIPT);
+    }
+    i = end - 1;
+  }
+}
+
 /**
  * Make a word from the selected blobs and run Tess on them.
  *
@@ -653,6 +747,8 @@ bool Tesseract::recog_all_words(PAGE_RES *page_res, ETEXT_DESC *monitor,
         }
         MarkDisplayedEquationSubscripts(word->best_choice, *word->box_word, *script_row->row,
                                         equation_offset);
+        MarkLoweredSuffixes(word->best_choice, *word->box_word, *script_row->row,
+                            equation_offset.offset);
       }
     }
   }
