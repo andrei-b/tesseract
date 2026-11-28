@@ -392,11 +392,32 @@ static void RereadLoweredSlot(LSTMRecognizer *recognizer, Image binary, Image or
     return;
   }
   PointerVector<WERD_RES> binary_read, gray_read;
-  auto id = ReadIsolatedIndex(recognizer, binary, pair.index, 48, 0, 0, &binary_read);
-  if (id == INVALID_UNICHAR_ID ||
-      ReadIsolatedIndex(recognizer, original, pair.index, 40, choice_mode, iterations,
-                        &gray_read) != id) {
+  const auto binary_id = ReadIsolatedIndex(recognizer, binary, pair.index, 48, 0, 0, &binary_read);
+  const auto id = ReadIsolatedIndex(recognizer, original, pair.index, 40, choice_mode,
+                                    iterations, &gray_read);
+  if (id == INVALID_UNICHAR_ID) {
     return;
+  }
+  if (binary_id != id) {
+    // Binarization can erase a thin serif or join strokes. Corroborate the
+    // gray glyph with the same ink next to its known base at reading size.
+    Image aligned = BaselineAlignedPair(original, pair);
+    if (!aligned) {
+      return;
+    }
+    TBOX bounds(0, 0, pixGetWidth(aligned), pixGetHeight(aligned));
+    ImageData sample(false, aligned);
+    PointerVector<WERD_RES> context;
+    recognizer->RecognizeLine(sample, 0, false, kWorstDictCertainty / kCertaintyScale,
+                              bounds, &context, 0, 0);
+    if (context.size() != 1 || !context[0]->best_choice) {
+      return;
+    }
+    const auto &pair_choice = *context[0]->best_choice;
+    if (pair_choice.length() != 2 || pair_choice.unichar_id(0) != word->best_choice->unichar_id(0) ||
+        pair_choice.unichar_id(1) != id || pair_choice.certainty(1) < -1.0f) {
+      return;
+    }
   }
   if (id != word->best_choice->unichar_id(1)) {
     // A first-pass digit is already a plausible index. Avoid exchanging one
